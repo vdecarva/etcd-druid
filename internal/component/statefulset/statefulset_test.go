@@ -544,6 +544,72 @@ func TestSyncWhenNoSTSExists(t *testing.T) {
 	}
 }
 
+func TestExtractMetricsPort(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name         string
+		urls         []string
+		expectedPort int32
+	}{
+		{
+			name:         "returns 0 when no URLs given",
+			urls:         nil,
+			expectedPort: 0,
+		},
+		{
+			name:         "extracts port from http URL",
+			urls:         []string{"http://0.0.0.0:2381"},
+			expectedPort: 2381,
+		},
+		{
+			name:         "extracts port from first URL when multiple are given",
+			urls:         []string{"http://0.0.0.0:2381", "http://127.0.0.1:2382"},
+			expectedPort: 2381,
+		},
+		{
+			name:         "skips unparseable URLs and falls through to next",
+			urls:         []string{"://bad", "http://0.0.0.0:2381"},
+			expectedPort: 2381,
+		},
+		{
+			name:         "returns 0 when all URLs are unparseable",
+			urls:         []string{"://bad1", "://bad2"},
+			expectedPort: 0,
+		},
+	}
+	g := NewWithT(t)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g.Expect(extractMetricsPort(tc.urls)).To(Equal(tc.expectedPort))
+		})
+	}
+}
+
+func TestSyncWithListenMetricsURLs(t *testing.T) {
+	t.Parallel()
+	g := NewWithT(t)
+	iv := testutils.CreateImageVector(true, true)
+
+	etcd := testutils.EtcdBuilderWithDefaults(testutils.TestEtcdName, testutils.TestNamespace).
+		WithReplicas(1).
+		WithListenMetricsURLs([]string{"http://0.0.0.0:2381"}).
+		Build()
+	cl := testutils.CreateTestFakeClientForObjects(nil, nil, nil, nil, []client.Object{buildBackupSecret()}, getObjectKey(etcd.ObjectMeta))
+	etcdImage, etcdBRImage, initContainerImage, err := utils.GetEtcdImages(etcd, iv)
+	g.Expect(err).ToNot(HaveOccurred())
+	stsMatcher := NewStatefulSetMatcher(g, cl, etcd, 1, initContainerImage, etcdImage, etcdBRImage, ptr.To(druidstore.Local), false)
+
+	operator := New(cl, iv, &etcdfake.Factory{Client: etcdfake.NewClient("etcd-test", 1)})
+	opCtx := component.NewOperatorContext(context.Background(), logr.Discard(), uuid.NewString())
+	opCtx.Data[common.CheckSumKeyConfigMap] = testutils.TestConfigMapCheckSum
+	g.Expect(operator.Sync(opCtx, etcd)).To(Succeed())
+
+	latestSTS, getErr := getLatestStatefulSet(cl, etcd)
+	g.Expect(getErr).To(Succeed())
+	g.Expect(*latestSTS).Should(stsMatcher.MatchStatefulSet())
+}
+
 // TestSyncScaleInShrinksStatefulSet verifies that a scale-in Sync deletes the
 // surplus PVCs (ordinals >= spec.replicas) and shrinks the StatefulSet to
 // spec.replicas in a single pass. Requeuing before the shrink would deadlock:
